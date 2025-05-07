@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import {use$ } from '@legendapp/state/react';
-import { Button, Radio, Typography, Layout, Space, Divider } from "antd";
+import { Button, Radio, Typography, Layout, Space } from "antd";
 import Header from "../../Header";
-import { initRCTPPeer, clean, error_message$ } from "./store";
+import { initRCTPPeer, clean } from "./store";
 
 const { Content, Sider } = Layout;
 const { Title } = Typography;
@@ -47,7 +46,9 @@ const Exam: React.FC = () => {
 
 	useEffect(() => {
 		(async () => {
-			const stream = await initRCTPPeer();
+			// TODO: Replace "1" with actual student ID from your auth system
+			const studentId = "1"; // This should come from your authentication system
+			const stream = await initRCTPPeer(studentId);
 			if (stream && videoRef.current) {
 				if (videoRef.current) {
 					videoRef.current.srcObject = stream;

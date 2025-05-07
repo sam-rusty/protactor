@@ -1,10 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Layout, Table, Typography, Button, Space, Spin, Row, Col } from "antd";
+import { Layout, Table, Typography, Button, Space, Spin, Row, Col, message } from "antd";
 import { get } from "../http";
+import { io } from 'socket.io-client';
+import { use$ } from '@legendapp/state/react';
+import { observable } from '@legendapp/state';
+import { API_URL } from "../constants";
 
 const { Header, Content } = Layout;
 const { Title, Text } = Typography;
+
+export const error_message$ = observable<string>('');
 
 interface Student {
 	first_name: string;
@@ -36,6 +42,245 @@ const StudentDetail: React.FC = () => {
 	const [student, setStudent] = useState<Student | null>(null);
 	const [activities, setActivities] = useState<Activity[]>([]);
 	const [loading, setLoading] = useState(true);
+	const [showPlayButton, setShowPlayButton] = useState(false);
+	const [isPlaying, setIsPlaying] = useState(false);
+	const videoRef = useRef<HTMLVideoElement>(null);
+	const errorMessage = use$(error_message$);
+	const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+	const socketRef = useRef<any>(null);
+
+	const handlePlayVideo = async () => {
+		if (videoRef.current) {
+			try {
+				// First ensure the video is muted
+				videoRef.current.muted = true;
+				
+				// Start playing
+				await videoRef.current.play();
+				console.log('Video playback started after user interaction');
+				
+				// After successful play, unmute
+				videoRef.current.muted = false;
+				setShowPlayButton(false);
+				setIsPlaying(true);
+			} catch (error) {
+				console.error('Error playing video after user interaction:', error);
+				// If unmuting fails, keep the video muted but playing
+				if (videoRef.current) {
+					videoRef.current.muted = true;
+				}
+			}
+		}
+	};
+
+	const initRCTPPeer = useCallback(async () => {
+		try {
+			console.log('Creating new peer connection');
+			// Clean up any existing connection
+			if (peerConnectionRef.current) {
+				peerConnectionRef.current.close();
+			}
+
+			// Create new peer connection
+			peerConnectionRef.current = new RTCPeerConnection({
+				iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+			});
+
+			// Handle incoming video track
+			peerConnectionRef.current.ontrack = (event) => {
+				console.log('Received video track event:', event);
+				console.log('Track kind:', event.track.kind);
+				console.log('Track enabled:', event.track.enabled);
+				console.log('Track muted:', event.track.muted);
+				console.log('Track readyState:', event.track.readyState);
+				console.log('Streams:', event.streams);
+				
+				// Get the receiver and track
+				const receiver = event.receiver;
+				const track = receiver.track;
+				
+				// Create a new MediaStream with the track
+				const stream = new MediaStream([track]);
+				console.log('Created new MediaStream with track');
+				
+				if (videoRef.current) {
+					// Set the stream to the video element
+					videoRef.current.srcObject = stream;
+					console.log('Set stream to video element');
+					
+					// Force video element to play
+					videoRef.current.play().then(() => {
+						console.log('Video playback started successfully');
+						// Check video element state
+						console.log('Video element readyState:', videoRef.current?.readyState);
+						console.log('Video element paused:', videoRef.current?.paused);
+						console.log('Video element muted:', videoRef.current?.muted);
+						console.log('Video element currentTime:', videoRef.current?.currentTime);
+					}).catch(error => {
+						console.error('Error playing video:', error);
+					});
+				} else {
+					console.error('Video element not available');
+				}
+				
+				// Monitor track state
+				track.onmute = () => {
+					console.log('Track was muted');
+				};
+				
+				track.onunmute = () => {
+					console.log('Track is now unmuted and ready to play');
+					if (videoRef.current) {
+						// Create a new stream with the unmuted track
+						const newStream = new MediaStream([track]);
+						videoRef.current.srcObject = newStream;
+						videoRef.current.play().catch(error => {
+							console.error('Error playing video after unmute:', error);
+						});
+					}
+				};
+			};
+
+			// Handle connection state changes
+			peerConnectionRef.current.onconnectionstatechange = () => {
+				console.log('Connection state changed:', peerConnectionRef.current?.connectionState);
+				if (peerConnectionRef.current?.connectionState === 'connected') {
+					console.log('WebRTC connection established!');
+					// Check if we have any tracks
+					const receivers = peerConnectionRef.current.getReceivers();
+					console.log('Current receivers:', receivers);
+					receivers.forEach(receiver => {
+						console.log('Receiver track:', receiver.track);
+						console.log('Receiver track enabled:', receiver.track.enabled);
+						console.log('Receiver track muted:', receiver.track.muted);
+						console.log('Receiver track readyState:', receiver.track.readyState);
+						
+						// If we have a video track, ensure it's attached to the video element
+						if (receiver.track && receiver.track.kind === 'video') {
+							const stream = new MediaStream([receiver.track]);
+							if (videoRef.current) {
+								videoRef.current.srcObject = stream;
+								videoRef.current.play().catch(error => {
+									console.error('Error playing video after connection:', error);
+								});
+							}
+						}
+					});
+				}
+			};
+
+			peerConnectionRef.current.oniceconnectionstatechange = () => {
+				console.log('ICE connection state changed:', peerConnectionRef.current?.iceConnectionState);
+				if (peerConnectionRef.current?.iceConnectionState === 'connected') {
+					console.log('ICE connection established!');
+				}
+			};
+
+			// Handle ICE candidates
+			peerConnectionRef.current.onicecandidate = (event) => {
+				if (event.candidate && id && socketRef.current) {
+					console.log('Sending ICE candidate:', event.candidate);
+					socketRef.current.emit('admin_candidate', {
+						studentId: id,
+						candidate: event.candidate.candidate,
+						sdpMid: event.candidate.sdpMid,
+						sdpMLineIndex: event.candidate.sdpMLineIndex
+					});
+				}
+			};
+
+			// Create and send offer
+			console.log('Creating offer');
+			const offer = await peerConnectionRef.current.createOffer({
+				offerToReceiveVideo: true,
+				offerToReceiveAudio: false
+			});
+			console.log('Created offer:', offer);
+			await peerConnectionRef.current.setLocalDescription(offer);
+			console.log('Set local description');
+			console.log('Sending offer for student:', id);
+			socketRef.current.emit('admin_offer', { 
+				studentId: id,
+				sdp: {
+					sdp: offer.sdp,
+					type: offer.type
+				}
+			});
+
+		} catch (error) {
+			console.error('WebRTC initialization error:', error);
+			error_message$.set(error instanceof Error ? error.message : 'Failed to initialize WebRTC');
+		}
+	}, [id]);
+
+	// Initialize socket connection
+	useEffect(() => {
+		console.log('Initializing socket connection');
+		socketRef.current = io(API_URL, { 
+			transports: ['websocket'],
+			reconnection: true,
+			reconnectionAttempts: 5
+		});
+
+		socketRef.current.on('connect', () => {
+			console.log('Socket connected');
+			if (id) {
+				initRCTPPeer();
+			}
+		});
+
+		socketRef.current.on('connect_error', (error: any) => {
+			console.error('Socket connection error:', error);
+			error_message$.set('Failed to connect to video server');
+		});
+
+		socketRef.current.on('admin_answer', async (data: any) => {
+			console.log('Received answer from student:', data);
+			if (peerConnectionRef.current) {
+				try {
+					await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription({
+						type: data.type,
+						sdp: data.sdp
+					}));
+					console.log('Set remote description successfully');
+				} catch (error) {
+					console.error('Error setting remote description:', error);
+					error_message$.set(error instanceof Error ? error.message : 'Failed to set remote description');
+				}
+			} else {
+				console.error('No peer connection available when receiving answer');
+			}
+		});
+
+		// Add handler for ICE candidates from student
+		socketRef.current.on('candidate', async (data: any) => {
+			console.log('Received ICE candidate from student:', data);
+			if (peerConnectionRef.current) {
+				try {
+					const candidate = new RTCIceCandidate({
+						candidate: data.candidate,
+						sdpMid: data.sdpMid,
+						sdpMLineIndex: data.sdpMLineIndex
+					});
+					await peerConnectionRef.current.addIceCandidate(candidate);
+					console.log('Added ICE candidate from student');
+				} catch (error) {
+					console.error('Error adding ICE candidate from student:', error);
+				}
+			}
+		});
+
+		return () => {
+			console.log('Cleaning up socket connection');
+			if (socketRef.current) {
+				socketRef.current.disconnect();
+			}
+			if (peerConnectionRef.current) {
+				peerConnectionRef.current.close();
+				peerConnectionRef.current = null;
+			}
+		};
+	}, [id, initRCTPPeer]);
 
 	useEffect(() => {
 		const fetchStudent = async () => {
@@ -66,6 +311,13 @@ const StudentDetail: React.FC = () => {
 
 		fetchData();
 	}, [id]);
+
+	// Show error messages
+	useEffect(() => {
+		if (errorMessage) {
+			message.error(errorMessage);
+		}
+	}, [errorMessage]);
 
 	if (loading) {
 		return (
@@ -100,8 +352,9 @@ const StudentDetail: React.FC = () => {
 								<Text>{student.email}</Text>
 							</Space>
 						</Col>
-						<Col span={12}>
+						<Col span={12} style={{ position: 'relative' }}>
 							<video
+								ref={videoRef}
 								style={{
 									width: 500,
 									maxHeight: "300px",
@@ -111,8 +364,45 @@ const StudentDetail: React.FC = () => {
 								}}
 								autoPlay
 								playsInline
-								muted
+								muted={true}
+								onLoadedMetadata={() => {
+									console.log('Video metadata loaded');
+									console.log('Video element readyState:', videoRef.current?.readyState);
+									console.log('Video element paused:', videoRef.current?.paused);
+									console.log('Video element muted:', videoRef.current?.muted);
+									setShowPlayButton(true);
+								}}
+								onPlay={() => {
+									console.log('Video started playing');
+									console.log('Video element readyState:', videoRef.current?.readyState);
+									console.log('Video element paused:', videoRef.current?.paused);
+									console.log('Video element muted:', videoRef.current?.muted);
+								}}
+								onPause={() => {
+									console.log('Video paused');
+									setIsPlaying(false);
+								}}
+								onError={(e) => {
+									console.error('Video error:', e);
+									console.error('Video element error code:', videoRef.current?.error?.code);
+									console.error('Video element error message:', videoRef.current?.error?.message);
+								}}
 							/>
+							{showPlayButton && !isPlaying && (
+								<Button
+									type="primary"
+									onClick={handlePlayVideo}
+									style={{
+										position: 'absolute',
+										top: '50%',
+										left: '50%',
+										transform: 'translate(-50%, -50%)',
+										zIndex: 1
+									}}
+								>
+									{isPlaying ? 'Playing...' : 'Play Video'}
+								</Button>
+							)}
 						</Col>
 					</Row>
 					<Title level={4}>Suspicious Activities</Title>
