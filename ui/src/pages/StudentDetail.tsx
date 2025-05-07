@@ -52,20 +52,25 @@ const StudentDetail: React.FC = () => {
 	const handlePlayVideo = async () => {
 		if (videoRef.current) {
 			try {
-				// First ensure the video is muted
-				videoRef.current.muted = true;
-				
-				// Start playing
+				// Start playing (video is already muted)
 				await videoRef.current.play();
 				console.log('Video playback started after user interaction');
 				
-				// After successful play, unmute
-				videoRef.current.muted = false;
+				// After successful play, try to unmute
+				try {
+					videoRef.current.muted = false;
+					console.log('Successfully unmuted video');
+				} catch (unmuteError) {
+					console.warn('Could not unmute video:', unmuteError);
+					// Keep video muted but playing
+					videoRef.current.muted = true;
+				}
+				
 				setShowPlayButton(false);
 				setIsPlaying(true);
 			} catch (error) {
 				console.error('Error playing video after user interaction:', error);
-				// If unmuting fails, keep the video muted but playing
+				// If play fails, keep the video muted
 				if (videoRef.current) {
 					videoRef.current.muted = true;
 				}
@@ -81,9 +86,14 @@ const StudentDetail: React.FC = () => {
 				peerConnectionRef.current.close();
 			}
 
-			// Create new peer connection
+			// Create new peer connection with more detailed configuration
 			peerConnectionRef.current = new RTCPeerConnection({
-				iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+				iceServers: [
+					{ urls: 'stun:stun.l.google.com:19302' },
+					{ urls: 'stun:stun1.l.google.com:19302' }
+				],
+				bundlePolicy: 'max-bundle',
+				rtcpMuxPolicy: 'require'
 			});
 
 			// Handle incoming video track
@@ -108,37 +118,19 @@ const StudentDetail: React.FC = () => {
 					videoRef.current.srcObject = stream;
 					console.log('Set stream to video element');
 					
-					// Force video element to play
+					// Try to play the video immediately
 					videoRef.current.play().then(() => {
 						console.log('Video playback started successfully');
-						// Check video element state
-						console.log('Video element readyState:', videoRef.current?.readyState);
-						console.log('Video element paused:', videoRef.current?.paused);
-						console.log('Video element muted:', videoRef.current?.muted);
-						console.log('Video element currentTime:', videoRef.current?.currentTime);
+						setShowPlayButton(false);
+						setIsPlaying(true);
 					}).catch(error => {
 						console.error('Error playing video:', error);
+						// If autoplay fails, show play button
+						setShowPlayButton(true);
 					});
 				} else {
 					console.error('Video element not available');
 				}
-				
-				// Monitor track state
-				track.onmute = () => {
-					console.log('Track was muted');
-				};
-				
-				track.onunmute = () => {
-					console.log('Track is now unmuted and ready to play');
-					if (videoRef.current) {
-						// Create a new stream with the unmuted track
-						const newStream = new MediaStream([track]);
-						videoRef.current.srcObject = newStream;
-						videoRef.current.play().catch(error => {
-							console.error('Error playing video after unmute:', error);
-						});
-					}
-				};
 			};
 
 			// Handle connection state changes
@@ -146,7 +138,7 @@ const StudentDetail: React.FC = () => {
 				console.log('Connection state changed:', peerConnectionRef.current?.connectionState);
 				if (peerConnectionRef.current?.connectionState === 'connected') {
 					console.log('WebRTC connection established!');
-					// Check if we have any tracks
+					// Check receivers after connection is established
 					const receivers = peerConnectionRef.current.getReceivers();
 					console.log('Current receivers:', receivers);
 					receivers.forEach(receiver => {
@@ -154,17 +146,6 @@ const StudentDetail: React.FC = () => {
 						console.log('Receiver track enabled:', receiver.track.enabled);
 						console.log('Receiver track muted:', receiver.track.muted);
 						console.log('Receiver track readyState:', receiver.track.readyState);
-						
-						// If we have a video track, ensure it's attached to the video element
-						if (receiver.track && receiver.track.kind === 'video') {
-							const stream = new MediaStream([receiver.track]);
-							if (videoRef.current) {
-								videoRef.current.srcObject = stream;
-								videoRef.current.play().catch(error => {
-									console.error('Error playing video after connection:', error);
-								});
-							}
-						}
 					});
 				}
 			};
@@ -174,6 +155,10 @@ const StudentDetail: React.FC = () => {
 				if (peerConnectionRef.current?.iceConnectionState === 'connected') {
 					console.log('ICE connection established!');
 				}
+			};
+
+			peerConnectionRef.current.onicegatheringstatechange = () => {
+				console.log('ICE gathering state:', peerConnectionRef.current?.iceGatheringState);
 			};
 
 			// Handle ICE candidates
@@ -186,6 +171,8 @@ const StudentDetail: React.FC = () => {
 						sdpMid: event.candidate.sdpMid,
 						sdpMLineIndex: event.candidate.sdpMLineIndex
 					});
+				} else if (!event.candidate) {
+					console.log('ICE gathering completed');
 				}
 			};
 
@@ -234,7 +221,7 @@ const StudentDetail: React.FC = () => {
 			error_message$.set('Failed to connect to video server');
 		});
 
-		socketRef.current.on('admin_answer', async (data: any) => {
+		socketRef.current.on('answer', async (data: any) => {
 			console.log('Received answer from student:', data);
 			if (peerConnectionRef.current) {
 				try {
@@ -268,6 +255,20 @@ const StudentDetail: React.FC = () => {
 					console.error('Error adding ICE candidate from student:', error);
 				}
 			}
+		});
+
+		// Add socket event listener for suspicious activities
+		socketRef.current.on('suspicious_activity', (data: any) => {
+			console.log('Received suspicious activity:', data);
+			// Add the new activity to the activities list
+			setActivities(prev => [{
+				id: data.id,
+				activity: data.activity,
+				timestamp: data.timestamp
+			}, ...prev]);
+			
+			// Show notification
+			message.warning(`Suspicious activity detected: ${data.activity}`);
 		});
 
 		return () => {
@@ -367,16 +368,25 @@ const StudentDetail: React.FC = () => {
 								muted={true}
 								onLoadedMetadata={() => {
 									console.log('Video metadata loaded');
-									console.log('Video element readyState:', videoRef.current?.readyState);
-									console.log('Video element paused:', videoRef.current?.paused);
-									console.log('Video element muted:', videoRef.current?.muted);
-									setShowPlayButton(true);
+									// Try to play immediately
+									if (videoRef.current) {
+										videoRef.current.play().then(() => {
+											console.log('Video autoplay started');
+											setShowPlayButton(false);
+											setIsPlaying(true);
+										}).catch(error => {
+											console.error('Autoplay failed:', error);
+											setShowPlayButton(true);
+										});
+									}
 								}}
 								onPlay={() => {
 									console.log('Video started playing');
-									console.log('Video element readyState:', videoRef.current?.readyState);
-									console.log('Video element paused:', videoRef.current?.paused);
-									console.log('Video element muted:', videoRef.current?.muted);
+									setIsPlaying(true);
+									// Try to unmute after play starts
+									if (videoRef.current) {
+										videoRef.current.muted = false;
+									}
 								}}
 								onPause={() => {
 									console.log('Video paused');
@@ -400,7 +410,7 @@ const StudentDetail: React.FC = () => {
 										zIndex: 1
 									}}
 								>
-									{isPlaying ? 'Playing...' : 'Play Video'}
+									Play Video
 								</Button>
 							)}
 						</Col>

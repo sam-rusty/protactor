@@ -1,0 +1,11 @@
+{
+  "name": "sam-protactor",
+  "version": "1.0.0",
+  "description": "SAM Protactor Application",
+  "scripts": {
+    "dev": "nodemon"
+  },
+  "dependencies": {
+    "nodemon": "^3.0.3"
+  }
+} 
